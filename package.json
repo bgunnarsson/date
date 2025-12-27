@@ -1,0 +1,28 @@
+{
+  "name": "@bgunnarsson/date",
+  "version": "1.0.0",
+  "description": "A tiny date library",
+  "type": "module",
+  "sideEffects": false,
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "bundle": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rimraf dist",
+    "dist": "npm publish"
+  },
+  "devDependencies": {
+    "tsup": "8",
+    "typescript": "5"
+  }
+}
