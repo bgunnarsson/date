@@ -1,15 +1,25 @@
-export type DateInput = Date | number | string
-type FormatOpts = Intl.DateTimeFormatOptions & { locale?: string; timeZone?: string }
-type RelativeOpts = { locale?: string; numeric?: Intl.RelativeTimeFormatNumeric }
+// date.ts (ESM)
 
-type Preset = 'date' | 'time' | 'datetime' | 'relative'
+export type DateInput = Date | number | string
+
+type IntlFormatOpts = Intl.DateTimeFormatOptions & {
+  locale?: string
+  timeZone?: string
+}
+
+type RelativeOpts = {
+  locale?: string
+  numeric?: Intl.RelativeTimeFormatNumeric
+  now?: DateInput
+}
 
 const _dtfCache = new Map<string, Intl.DateTimeFormat>()
 const _rtfCache = new Map<string, Intl.RelativeTimeFormat>()
 
 function toDate(input: DateInput): Date {
   if (input instanceof Date) return input
-  return new Date(input)
+  if (typeof input === 'number') return new Date(input)
+  return new Date(input) // expects ISO8601 or RFC2822
 }
 
 function assertValid(d: Date) {
@@ -20,105 +30,149 @@ function pad2(n: number) {
   return n < 10 ? `0${n}` : `${n}`
 }
 
-function dtf(locale: string | undefined, timeZone: string | undefined, opts: Intl.DateTimeFormatOptions) {
-  const key = JSON.stringify([locale ?? null, timeZone ?? null, opts])
-  const hit = _dtfCache.get(key)
-  if (hit) return hit
-  const fmt = new Intl.DateTimeFormat(locale, { ...opts, timeZone })
-  _dtfCache.set(key, fmt)
-  return fmt
-}
-
-function rtf(locale: string | undefined, numeric: Intl.RelativeTimeFormatNumeric) {
-  const key = JSON.stringify([locale ?? null, numeric])
-  const hit = _rtfCache.get(key)
-  if (hit) return hit
-  const fmt = new Intl.RelativeTimeFormat(locale, { numeric })
-  _rtfCache.set(key, fmt)
-  return fmt
-}
-
-function formatPreset(d: Date, preset: Exclude<Preset, 'relative'>, opts: FormatOpts) {
-  if (preset === 'date') {
-    return dtf(opts.locale, opts.timeZone, { year: 'numeric', month: 'short', day: '2-digit', ...opts }).format(d)
+function stableKey(obj: Record<string, unknown>) {
+  const keys = Object.keys(obj).sort()
+  let out = ''
+  for (const k of keys) {
+    const v = obj[k]
+    out += `${k}=`
+    if (v === undefined) out += 'u'
+    else if (v === null) out += 'n'
+    else if (typeof v === 'string') out += `s:${v}`
+    else if (typeof v === 'number') out += `d:${v}`
+    else if (typeof v === 'boolean') out += `b:${v ? 1 : 0}`
+    else out += `o:${JSON.stringify(v)}`
+    out += ';'
   }
-  if (preset === 'time') {
-    return dtf(opts.locale, opts.timeZone, { hour: '2-digit', minute: '2-digit', ...opts }).format(d)
+  return out
+}
+
+function getDtf(locale: string, timeZone: string | undefined, opts: Intl.DateTimeFormatOptions) {
+  const key = stableKey({ locale, timeZone, ...opts })
+  let dtf = _dtfCache.get(key)
+  if (!dtf) {
+    const o: Intl.DateTimeFormatOptions = { ...opts }
+    if (timeZone) o.timeZone = timeZone
+    dtf = new Intl.DateTimeFormat(locale, o)
+    _dtfCache.set(key, dtf)
   }
-  return dtf(opts.locale, opts.timeZone, {
-    year: 'numeric',
-    month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    ...opts,
-  }).format(d)
+  return dtf
 }
 
-function formatRelative(d: Date, opts: RelativeOpts) {
-  const now = Date.now()
-  const diffMs = d.getTime() - now
-  const abs = Math.abs(diffMs)
-
-  const minute = 60_000
-  const hour = 60 * minute
-  const day = 24 * hour
-  const week = 7 * day
-
-  const fmt = rtf(opts.locale, opts.numeric ?? 'auto')
-
-  if (abs < hour) return fmt.format(Math.round(diffMs / minute), 'minute')
-  if (abs < day) return fmt.format(Math.round(diffMs / hour), 'hour')
-  if (abs < week) return fmt.format(Math.round(diffMs / day), 'day')
-  return fmt.format(Math.round(diffMs / week), 'week')
+function getRtf(locale: string, numeric: Intl.RelativeTimeFormatNumeric) {
+  const key = stableKey({ locale, numeric })
+  let rtf = _rtfCache.get(key)
+  if (!rtf) {
+    rtf = new Intl.RelativeTimeFormat(locale, { numeric })
+    _rtfCache.set(key, rtf)
+  }
+  return rtf
 }
 
-// minimal token patterns (local time)
-function formatTokensLocal(d: Date, pattern: string) {
-  const y = d.getFullYear()
-  const m = d.getMonth() + 1
-  const day = d.getDate()
-  const hh = d.getHours()
-  const mm = d.getMinutes()
-  const ss = d.getSeconds()
+function formatTokens(d: Date, pattern: string) {
+  // Single-pass token replacement. No chained replace calls. No recursion.
+  const Y = d.getFullYear()
+  const M = d.getMonth() + 1
+  const D = d.getDate()
+  const H = d.getHours()
+  const m = d.getMinutes()
+  const s = d.getSeconds()
 
-  return pattern
-    .replace(/YYYY/g, `${y}`)
-    .replace(/MM/g, pad2(m))
-    .replace(/DD/g, pad2(day))
-    .replace(/HH/g, pad2(hh))
-    .replace(/mm/g, pad2(mm))
-    .replace(/ss/g, pad2(ss))
+  const map: Record<string, string> = {
+    YYYY: String(Y),
+    YY: String(Y).slice(-2),
+    MM: pad2(M),
+    M: String(M),
+    DD: pad2(D),
+    D: String(D),
+    HH: pad2(H),
+    H: String(H),
+    mm: pad2(m),
+    m: String(m),
+    ss: pad2(s),
+    s: String(s),
+  }
+
+  // Order matters: longest first to avoid partial matches.
+  const re = /YYYY|YY|MM|DD|HH|mm|ss|M|D|H|m|s/g
+  return pattern.replace(re, (tok) => map[tok] ?? tok)
 }
 
-const TOKEN_RE = /Y{4}|M{2}|D{2}|H{2}|m{2}|s{2}/
-
-const date = {
-  format(input: DateInput, presetOrPattern: Preset | string, opts: FormatOpts = {}) {
+export const date = {
+  // Simple token-based formatting: "DD.MM.YYYY", "YYYY-MM-DD", "DD/MM/YYYY HH:mm"
+  format(input: DateInput, pattern = 'YYYY-MM-DD') {
     const d = toDate(input)
     assertValid(d)
-
-    if (presetOrPattern === 'relative') return formatRelative(d, opts)
-
-    if (presetOrPattern === 'date' || presetOrPattern === 'time' || presetOrPattern === 'datetime') {
-      return formatPreset(d, presetOrPattern, opts)
-    }
-
-    // token pattern (fast, local time)
-    if (TOKEN_RE.test(presetOrPattern)) return formatTokensLocal(d, presetOrPattern)
-
-    // fallback: treat as Intl options preset "date"
-    return formatPreset(d, 'date', opts)
+    return formatTokens(d, pattern)
   },
 
-  addDays(input: DateInput, days: number) {
+  // Locale/Intl formatting, cached by locale+tz+options (never by input date)
+  formatIntl(input: DateInput, opts: IntlFormatOpts = {}) {
     const d = toDate(input)
     assertValid(d)
-    const out = new Date(d.getTime())
-    out.setUTCDate(out.getUTCDate() + days)
-    return out
+
+    const locale = opts.locale ?? undefined
+    const timeZone = opts.timeZone ?? undefined
+
+    const { locale: _l, timeZone: _tz, ...dtfOpts } = opts
+    const dtf = getDtf(locale ?? 'en-US', timeZone, dtfOpts)
+    return dtf.format(d)
+  },
+
+  // Relative time from "now" (default: Date.now), cached formatter
+  relative(input: DateInput, opts: RelativeOpts = {}) {
+    const now = opts.now ? toDate(opts.now) : new Date()
+    const d = toDate(input)
+    assertValid(now)
+    assertValid(d)
+
+    const locale = opts.locale ?? 'en-US'
+    const numeric = opts.numeric ?? 'auto'
+    const rtf = getRtf(locale, numeric)
+
+    const diffMs = d.getTime() - now.getTime()
+    const absMs = Math.abs(diffMs)
+
+    const sec = 1000
+    const min = 60 * sec
+    const hour = 60 * min
+    const day = 24 * hour
+    const week = 7 * day
+    const month = 30 * day
+    const year = 365 * day
+
+    let unit: Intl.RelativeTimeFormatUnit = 'second'
+    let value = diffMs / sec
+
+    if (absMs >= year) {
+      unit = 'year'
+      value = diffMs / year
+    } else if (absMs >= month) {
+      unit = 'month'
+      value = diffMs / month
+    } else if (absMs >= week) {
+      unit = 'week'
+      value = diffMs / week
+    } else if (absMs >= day) {
+      unit = 'day'
+      value = diffMs / day
+    } else if (absMs >= hour) {
+      unit = 'hour'
+      value = diffMs / hour
+    } else if (absMs >= min) {
+      unit = 'minute'
+      value = diffMs / min
+    }
+
+    const rounded = value < 0 ? Math.ceil(value) : Math.floor(value)
+    return rtf.format(rounded, unit)
+  },
+
+  // For tests/debugging
+  _clearCaches() {
+    _dtfCache.clear()
+    _rtfCache.clear()
   },
 }
 
 export default date
-
